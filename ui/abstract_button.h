@@ -60,12 +60,18 @@ public:
 
 	void clicked(Qt::KeyboardModifiers modifiers, Qt::MouseButton button);
 
+	QAccessible::Role accessibilityRole() override {
+		return QAccessible::Role::Button;
+	}
+
 protected:
 	void enterEventHook(QEnterEvent *e) override;
 	void leaveEventHook(QEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void mouseReleaseEvent(QMouseEvent *e) override;
+	void keyPressEvent(QKeyEvent *e) override;
+	void keyReleaseEvent(QKeyEvent *e) override;
 
 protected:
 	enum class StateFlag {
@@ -99,6 +105,7 @@ protected:
 private:
 	void updateCursor();
 	void checkIfOver(QPoint localPos);
+	[[nodiscard]] bool isSubmitEvent(not_null<QKeyEvent*> e) const;
 
 	State _state = StateFlag::None;
 

@@ -1567,6 +1567,8 @@ InputField::InputField(
 
 	_placeholderFull.value(
 	) | rpl::start_with_next([=](const QString &text) {
+		accessibilityNameChanged();
+		_inner->setAccessibleName(text);
 		refreshPlaceholder(text);
 	}, lifetime());
 

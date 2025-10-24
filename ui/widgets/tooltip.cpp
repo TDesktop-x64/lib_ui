@@ -83,6 +83,7 @@ void Tooltip::popup(const QPoint &m, const QString &text, const style::Tooltip *
 	_point = m;
 	_st = st;
 	_text = Text::String(_st->textStyle, text, kPlainTextOptions, _st->widthMax);
+	accessibilityNameChanged();
 
 	_useTransparency = Platform::TranslucentWindowsSupported();
 	setAttribute(Qt::WA_OpaquePaintEvent, !_useTransparency);

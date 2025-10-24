@@ -17,16 +17,13 @@
 #include <QtWidgets/QWidget>
 #include <QtCore/QPointer>
 #include <QtGui/QtEvents>
-
-namespace Ui {
-
-void ToggleChildrenVisibility(not_null<QWidget*> widget, bool visible);
-
-} // namespace Ui
+#include <QAccessible>
 
 namespace Ui {
 
 class RpWidget;
+
+void ToggleChildrenVisibility(not_null<QWidget*> widget, bool visible);
 
 void ResizeFitChild(
 	not_null<RpWidget*> parent,
@@ -372,6 +369,13 @@ public:
 			std::clamp(visibleTop, 0, max),
 			std::clamp(visibleBottom, 0, max));
 	}
+
+	[[nodiscard]] virtual QAccessibleInterface *accessibilityCreate();
+	[[nodiscard]] virtual QAccessible::Role accessibilityRole();
+	[[nodiscard]] virtual QString accessibilityName();
+	void accessibilityNameChanged();
+	[[nodiscard]] virtual QString accessibilityDescription();
+	void accessibilityDescriptionChanged();
 
 protected:
 	// e - from enterEvent() of child RpWidget

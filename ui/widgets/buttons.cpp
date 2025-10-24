@@ -94,6 +94,7 @@ void LinkButton::paintEvent(QPaintEvent *e) {
 void LinkButton::setText(const QString &text) {
 	_text = text;
 	_textWidth = _st.font->width(_text);
+	accessibilityNameChanged();
 	resizeToText();
 	update();
 }
@@ -236,6 +237,7 @@ FlatButton::FlatButton(
 
 void FlatButton::setText(const QString &text) {
 	_text = text;
+	accessibilityNameChanged();
 	update();
 }
 
@@ -303,6 +305,7 @@ RoundButton::RoundButton(
 , _roundRectOver(st.radius ? st.radius : st::buttonRadius, _st.textBgOver) {
 	_textFull.value(
 	) | rpl::start_with_next([=](const TextWithEntities &text) {
+		accessibilityNameChanged();
 		resizeToText(text);
 	}, lifetime());
 }
@@ -551,6 +554,11 @@ RoundButton::~RoundButton() = default;
 IconButton::IconButton(QWidget *parent, const style::IconButton &st) : RippleButton(parent, st.ripple)
 , _st(st) {
 	resize(_st.width, _st.height);
+}
+
+void IconButton::accessibilitySetName(QString name) {
+	_accessibilityName = std::move(name);
+	accessibilityNameChanged();
 }
 
 const style::IconButton &IconButton::st() const {
@@ -802,7 +810,7 @@ SettingsButton::SettingsButton(
 
 SettingsButton::SettingsButton(
 	QWidget *parent,
-	nullptr_t,
+	std::nullptr_t,
 	const style::SettingsButton &st)
 : RippleButton(parent, st.ripple)
 , _st(st)
@@ -963,6 +971,7 @@ void SettingsButton::onStateChanged(
 
 void SettingsButton::setText(TextWithEntities &&text) {
 	_text.setMarkedText(_st.style, text, kMarkupTextOptions, _context);
+	accessibilityNameChanged();
 	update();
 }
 

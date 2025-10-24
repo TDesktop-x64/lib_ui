@@ -168,6 +168,7 @@ void LabelSimple::setText(const QString &value, bool *outTextChanged) {
 		if (outTextChanged) *outTextChanged = false;
 		return;
 	}
+	accessibilityNameChanged();
 
 	_fullText = value;
 	_fullTextWidth = _st.font->width(_fullText);
@@ -250,7 +251,6 @@ FlatLabel::FlatLabel(
 , _stMenu(stMenu)
 , _touchSelectTimer([=] { touchSelect(); }) {
 	textUpdated();
-
 	std::move(
 		text
 	) | rpl::start_with_next([=](const TextWithEntities &value) {
@@ -264,6 +264,7 @@ void FlatLabel::init() {
 }
 
 void FlatLabel::textUpdated() {
+	accessibilityNameChanged();
 	refreshSize();
 	setMouseTracking(_selectable || _text.hasLinks());
 	if (_text.hasSpoilers()) {
