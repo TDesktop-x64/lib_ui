@@ -49,7 +49,7 @@ TextParseOptions MenuTextOptions = {
 } // namespace
 
 Action::Action(
-	not_null<RpWidget*> parent,
+	not_null<Menu*> parent,
 	const style::Menu &st,
 	not_null<QAction*> action,
 	const style::icon *icon,
@@ -64,7 +64,7 @@ Action::Action(
 	+ _st.itemPadding.bottom()) {
 	setAcceptBoth(true);
 
-	initResizeHook(parent->sizeValue());
+	fitToMenuWidth();
 	processAction();
 
 	enableMouseSelecting();

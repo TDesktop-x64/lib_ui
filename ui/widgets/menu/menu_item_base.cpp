@@ -11,14 +11,10 @@
 namespace Ui::Menu {
 
 ItemBase::ItemBase(
-	not_null<RpWidget*> parent,
+	not_null<Menu*> parent,
 	const style::Menu &st)
-: RippleButton(parent, st.ripple) {
-}
-
-void ItemBase::setMenuAsParent(not_null<Menu*> menu) {
-	QWidget::setParent(menu);
-	_menu = menu;
+: RippleButton(parent, st.ripple)
+, _menu(parent) {
 }
 
 void ItemBase::setSelected(
@@ -98,11 +94,11 @@ int ItemBase::minWidth() const {
 	return _minWidth.current();
 }
 
-void ItemBase::initResizeHook(rpl::producer<QSize> &&size) {
-	std::move(
-		size
-	) | rpl::on_next([=](QSize s) {
-		resize(s.width(), contentHeight());
+void ItemBase::fitToMenuWidth() {
+	_menu->widthValue() | rpl::on_next([=](int w) {
+		if (w > 0) {
+			resize(w, contentHeight());
+		}
 	}, lifetime());
 }
 
