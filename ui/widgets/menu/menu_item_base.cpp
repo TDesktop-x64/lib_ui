@@ -141,8 +141,7 @@ void ItemBase::enableMouseSelecting(not_null<RpWidget*> widget) {
 	}, lifetime());
 }
 
-void ItemBase::setClickedCallback(Fn<void()> callback) {
-	Ui::AbstractButton::setClickedCallback(callback);
+void ItemBase::setActionTriggered(Fn<void()> callback) {
 	if (callback) {
 		_connection = QObject::connect(
 			action(),
