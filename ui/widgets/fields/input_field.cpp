@@ -505,6 +505,9 @@ public:
 		const auto check = [&](Edge edge) {
 			if (_position > 0) {
 				const auto before = text[_position - 1];
+				if (tag == kTagPre && before != '\n' && before != '\r') {
+					return false;
+				}
 				if ((edge == Edge::Open && !isGoodBefore(before))
 					|| (edge == Edge::Close && isBadBefore(before))) {
 					return false;
@@ -3069,7 +3072,7 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 	const auto insertedTagsProcessor = _insertedTagsAreFromMime
 		? (_tagMimeProcessor ? _tagMimeProcessor : DefaultTagMimeProcessor)
 		: nullptr;
-	const auto breakTagOnNotLetterTill = ProcessInsertedTags(
+	auto breakTagOnNotLetterTill = ProcessInsertedTags(
 		_st,
 		document,
 		insertPosition,
@@ -3427,10 +3430,13 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 						action.customEmojiLink);
 				}
 				insertPosition = action.intervalStart + 1;
-				if (insertEnd >= action.intervalEnd) {
-					insertEnd -= action.intervalEnd
-						- action.intervalStart
-						- 1;
+				insertEnd = insertPosition
+					+ std::max(insertEnd - action.intervalEnd, 0);
+				if (breakTagOnNotLetterTill > action.intervalStart) {
+					breakTagOnNotLetterTill = insertPosition
+						+ std::max(
+							breakTagOnNotLetterTill - action.intervalEnd,
+							0);
 				}
 			} else if (action.type == ActionType::RemoveTag) {
 				RemoveDocumentTags(
