@@ -148,6 +148,8 @@ public:
 	void setContextCopyText(const QString &copyText);
 	void setBreakEverywhere(bool breakEverywhere);
 	void setTryMakeSimilarLines(bool tryMakeSimilarLines);
+	void setSkipBlock(int width, int height);
+	void setColors(std::span<Text::SpecialColor> colors);
 	enum class WhichAnimationsPaused {
 		None,
 		CustomEmoji,
@@ -193,6 +195,8 @@ public:
 		style::color bg,
 		QPoint fromPosition = QPoint(),
 		QPoint toPosition = QPoint());
+
+	[[nodiscard]] std::vector<int> countLineWidths() const;
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -249,6 +253,9 @@ private:
 	int _fullTextHeight = 0;
 	bool _breakEverywhere = false;
 	bool _tryMakeSimilarLines = false;
+	int _skipBlockWidth = 0;
+	int _skipBlockHeight = 0;
+	std::span<Text::SpecialColor> _colors;
 
 	style::cursor _cursor = style::cur_default;
 	bool _selectable = false;

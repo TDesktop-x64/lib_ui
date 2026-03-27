@@ -265,6 +265,9 @@ void FlatLabel::init() {
 
 void FlatLabel::textUpdated() {
 	accessibilityNameChanged();
+	if (_skipBlockWidth > 0 && _skipBlockHeight > 0) {
+		_text.updateSkipBlock(_skipBlockWidth, _skipBlockHeight);
+	}
 	refreshSize();
 	setMouseTracking(_selectable || _text.hasLinks());
 	if (_text.hasSpoilers()) {
@@ -316,6 +319,25 @@ void FlatLabel::setBreakEverywhere(bool breakEverywhere) {
 
 void FlatLabel::setTryMakeSimilarLines(bool tryMakeSimilarLines) {
 	_tryMakeSimilarLines = tryMakeSimilarLines;
+}
+
+void FlatLabel::setSkipBlock(int width, int height) {
+	if (_skipBlockWidth == width && _skipBlockHeight == height) {
+		return;
+	}
+	_skipBlockWidth = width;
+	_skipBlockHeight = height;
+	if (width > 0 && height > 0) {
+		_text.updateSkipBlock(width, height);
+	} else {
+		_text.removeSkipBlock();
+	}
+	refreshSize();
+}
+
+void FlatLabel::setColors(std::span<Text::SpecialColor> colors) {
+	_colors = colors;
+	update();
 }
 
 int FlatLabel::resizeGetHeight(int newWidth) {
@@ -807,6 +829,15 @@ CrossFadeAnimation::Data FlatLabel::crossFadeData(
 	return result;
 }
 
+std::vector<int> FlatLabel::countLineWidths() const {
+	const auto textWidth = _textWidth
+		? _textWidth
+		: (width() - _st.margin.left() - _st.margin.right());
+	return _text.countLineWidths(textWidth, {
+		.breakEverywhere = _breakEverywhere,
+	});
+}
+
 std::unique_ptr<CrossFadeAnimation> FlatLabel::CrossFade(
 		not_null<FlatLabel*> from,
 		not_null<FlatLabel*> to,
@@ -989,6 +1020,7 @@ void FlatLabel::paintEvent(QPaintEvent *e) {
 		.align = _st.align,
 		.clip = e->rect(),
 		.palette = &_st.palette,
+		.colors = _colors,
 		.spoiler = Text::DefaultSpoilerCache(),
 		.now = crl::now(),
 		.pausedEmoji = (paused == WhichAnimationsPaused::CustomEmoji
