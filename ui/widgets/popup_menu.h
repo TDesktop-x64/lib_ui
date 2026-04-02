@@ -10,6 +10,7 @@
 #include "ui/widgets/menu/menu.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/panel_animation.h"
+#include "ui/widgets/shadow.h"
 #include "ui/round_rect.h"
 #include "ui/rp_widget.h"
 #include "base/object_ptr.h"
@@ -210,6 +211,7 @@ private:
 	const style::PopupMenu &_st;
 
 	RoundRect _roundRect;
+	BoxShadow _boxShadow;
 	object_ptr<ScrollArea> _scroll;
 	not_null<Menu::Menu*> _menu;
 	object_ptr<RpWidget> _roundingOverlay = { nullptr };
@@ -247,6 +249,7 @@ private:
 	bool _reactivateParent = true;
 	bool _grabbingForPanelAnimation = false;
 
+	int _touchBeginCounter = 0;
 	int _topShift = 0;
 	bool _clearLastSeparator = true;
 	bool _keepingDelayedActivationPaused = false;
@@ -272,6 +275,7 @@ private:
 		SwitchDirection direction = SwitchDirection::LeftToRight;
 	};
 	std::unique_ptr<SwitchState> _switchState;
+	void startSwitchAnimation(not_null<SwitchState*> raw, float64 from);
 
 };
 
