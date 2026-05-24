@@ -8,12 +8,15 @@
 
 #include "base/flat_map.h"
 #include "base/weak_ptr.h"
+#include "ui/platform/ui_platform_utility.h"
 #include "ui/rp_widget.h"
 #include "ui/effects/animations.h"
 #include "ui/layers/layer_widget.h"
 #include "ui/text/text_entity.h"
 
 #include <rpl/variable.h>
+
+#include <optional>
 
 class Painter;
 
@@ -48,6 +51,8 @@ class FadeWrap;
 
 struct SeparatePanelArgs {
 	QWidget *parent = nullptr;
+	std::optional<QRect> anchorGeometry;
+	Platform::ForeignParent transientParent;
 	bool onAllSpaces = false;
 	Fn<bool(int zorder)> animationsPaused;
 	const style::PopupMenu *menuSt = nullptr;
@@ -70,6 +75,9 @@ public:
 	[[nodiscard]] QMargins computePadding() const;
 
 	void setHideOnDeactivate(bool hideOnDeactivate);
+	void setAnchorData(
+		std::optional<QRect> geometry,
+		Platform::ForeignParent transientParent);
 	void showAndActivate();
 	int hideGetDuration();
 
@@ -169,6 +177,7 @@ private:
 
 	void showMenu(Fn<void(const Menu::MenuCallback&)> fill);
 	[[nodiscard]] bool createMenu(not_null<IconButton*> button);
+	void moveToAnchorGeometry();
 
 	void createFullScreenButtons();
 	void initFullScreenButton(not_null<QWidget*> button);
@@ -180,6 +189,10 @@ private:
 	void toggleSearch(bool shown);
 	[[nodiscard]] rpl::producer<> allBackRequests() const;
 	[[nodiscard]] rpl::producer<> allCloseRequests() const;
+
+	std::optional<QRect> _anchorGeometry;
+	Platform::ForeignParent _transientParent;
+	bool _foreignTransientParentApplied = false;
 
 	const style::PopupMenu &_menuSt;
 	object_ptr<IconButton> _close;
