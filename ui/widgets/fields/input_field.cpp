@@ -10,7 +10,6 @@
 #include "base/qt_signal_producer.h"
 #include "base/qt/qt_common_adapters.h"
 #include "base/invoke_queued.h"
-#include "base/qthelp_regex.h"
 #include "base/random.h"
 #include "ui/platform/ui_platform_utility.h"
 #include "emoji_suggestions_helper.h"
@@ -466,9 +465,12 @@ void TrimFullCoverageTags(TextWithTags &parsed) {
 		return link.toString();
 	}
 	const auto index = link.indexOf('?');
-	return u"%1?%2"_q
-		.arg((index < 0) ? link : base::StringViewMid(link, 0, index))
-		.arg(++GlobalCustomEmojiCounter);
+	const auto data = (index < 0)
+		? link
+		: base::StringViewMid(link, 0, index);
+	return data.toString()
+		+ u"?"_q
+		+ QString::number(++GlobalCustomEmojiCounter);
 }
 
 [[nodiscard]] QString DefaultTagMimeProcessor(QStringView mimeTag) {
@@ -477,13 +479,7 @@ void TrimFullCoverageTags(TextWithTags &parsed) {
 }
 
 [[nodiscard]] uint64 CustomEmojiIdFromLink(QStringView link) {
-	const auto skip = InputField::kCustomEmojiTagStart.size();
-	const auto index = link.indexOf('?', skip + 1);
-	return base::StringViewMid(
-		link,
-		skip,
-		(index <= skip) ? -1 : (index - skip)
-	).toULongLong();
+	return InputField::CustomEmojiEntityData(link).toULongLong();
 }
 
 [[nodiscard]] QString CheckFullTextTag(
@@ -1900,6 +1896,8 @@ InputField::InputField(
 
 	_inner->setContentsMargins(0, 0, 0, 0);
 	_inner->document()->setDocumentMargin(0);
+	updateRootFrameFormat();
+	_inner->document()->clearUndoRedoStacks();
 
 	base::qt_signal_producer(
 		_inner->document(),
@@ -3272,9 +3270,14 @@ QString InputField::getTextPart(
 						}
 						result.append(collapsed.text);
 					} else {
-						adjustedLength += emojiText.size() - 1;
-						if (!emojiText.isEmpty()) {
-							result.append(emojiText);
+						const auto replacement = !emojiText.isEmpty()
+							? emojiText
+							: (format.objectType() == kCustomEmojiFormat)
+							? kObjectReplacement
+							: QString();
+						adjustedLength += replacement.size() - 1;
+						if (!replacement.isEmpty()) {
+							result.append(replacement);
 						}
 					}
 					begin = ch + 1;
@@ -3816,8 +3819,9 @@ void InputField::documentContentsChanged(
 void InputField::updateRootFrameFormat() {
 	const auto document = _inner->document();
 	auto format = document->rootFrame()->frameFormat();
-	const auto propertyId = QTextFrameFormat::FrameTopMargin;
-	const auto topMargin = format.property(propertyId).toInt();
+	auto changed = false;
+	const auto topPropertyId = QTextFrameFormat::FrameTopMargin;
+	const auto topMargin = format.property(topPropertyId).toInt();
 	const auto wantedTopMargin = StartsWithPre(document)
 		? (_st.style.pre.padding.top()
 			+ _st.style.pre.header
@@ -3827,7 +3831,23 @@ void InputField::updateRootFrameFormat() {
 		_requestedDocumentTopMargin = topMargin;
 	} else if (topMargin != wantedTopMargin) {
 		const auto value = QVariant::fromValue(1. * wantedTopMargin);
-		format.setProperty(propertyId, value);
+		format.setProperty(topPropertyId, value);
+		changed = true;
+	}
+
+	// Reserve room for the caret after the longest line, otherwise Qt
+	// clamps scroll and clips it (+1 covers whole-pixel rounding).
+	const auto rightPropertyId = QTextFrameFormat::FrameRightMargin;
+	const auto rightMargin = format.property(rightPropertyId).toInt();
+	const auto wantedRightMargin = std::max(
+		int(std::ceil(document->documentMargin())),
+		_inner->cursorWidth() + 1);
+	if (rightMargin != wantedRightMargin) {
+		const auto value = QVariant::fromValue(1. * wantedRightMargin);
+		format.setProperty(rightPropertyId, value);
+		changed = true;
+	}
+	if (changed) {
 		document->rootFrame()->setFrameFormat(format);
 	}
 }
@@ -4297,10 +4317,10 @@ void InputField::keyPressEventInner(QKeyEvent *e) {
 		if (alt || ctrl) {
 			e->ignore();
 		} else {
-			auto handled = false;
-			_tabbed.fire(&handled);
-			if (!handled
-				&& !focusNextPrevChild(key == Qt::Key_Tab && !shift)) {
+			const auto forward = (key == Qt::Key_Tab) && !shift;
+			auto request = TabbedRequest{ .backward = !forward };
+			_tabbed.fire(&request);
+			if (!request.handled && !focusNextPrevChild(forward)) {
 				e->ignore();
 			}
 		}
@@ -5361,16 +5381,18 @@ bool InputField::IsInstantViewAnchorLink(QStringView link) {
 }
 
 QString InputField::CustomEmojiLink(QStringView entityData) {
-	return MakeUniqueCustomEmojiLink(u"%1%2"_q
-		.arg(kCustomEmojiTagStart)
-		.arg(entityData));
+	return MakeUniqueCustomEmojiLink(
+		kCustomEmojiTagStart + entityData.toString());
 }
 
 QString InputField::CustomEmojiEntityData(QStringView link) {
-	const auto match = qthelp::regex_match(
-		"^(\\d+)(\\?|$)",
-		base::StringViewMid(link, kCustomEmojiTagStart.size()));
-	return match ? match->captured(1) : QString();
+	if (!link.startsWith(kCustomEmojiTagStart)) {
+		return QString();
+	}
+	const auto skip = kCustomEmojiTagStart.size();
+	const auto index = link.indexOf('?', skip);
+	const auto length = (index < 0) ? -1 : (index - skip);
+	return base::StringViewMid(link, skip, length).toString();
 }
 
 void InputField::commitMarkdownLinkEdit(
@@ -5987,7 +6009,8 @@ void InputField::insertFromMimeDataInner(const QMimeData *source) {
 		}
 		if (source->hasHtml() && !_markdownEnabledState.disabled()) {
 			if (auto parsed = TextUtilities::TextWithTagsFromHtml(
-					source->html())) {
+					source->html(),
+					_instantViewEditorTagsEnabled)) {
 				if (!HtmlTextMatchesPlainTextStart(
 						parsed->text,
 						source->text())) {
@@ -6106,7 +6129,8 @@ rpl::producer<bool> InputField::focusedChanges() const {
 	return _focusedChanges.events();
 }
 
-rpl::producer<not_null<bool*>> InputField::tabbed() const {
+auto InputField::tabbed() const
+-> rpl::producer<not_null<TabbedRequest*>> {
 	return _tabbed.events();
 }
 
