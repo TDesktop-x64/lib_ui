@@ -1254,9 +1254,11 @@ void String::enumerateLines(
 			paragraphRTL = resolveRTL(static_cast<const NewlineBlock*>(
 				_blocks[block].get())->paragraphDirection());
 			lineStartBlockHint = block + 1;
-			initNextParagraph(index, w->position());
+			initNextParagraph(
+				index,
+				blockPosition(begin(_blocks) + lineStartBlockHint));
 			longWordLine = true;
-			lastWordStart = w;
+			lastWordStart = w + 1;
 			lastWordStart_wLeft = widthLeft;
 			continue;
 		} else if (!qlinesleft) {
@@ -1269,7 +1271,12 @@ void String::enumerateLines(
 		const auto newWidthLeft = widthLeft
 			- last_rBearing
 			- (last_rPadding + w__f_width - w__f_rbearing);
-		if (newWidthLeft >= 0) {
+		// A word starting the line is laid out on it even when it doesn't
+		// fit: rolling it over would leave an empty line that the renderer
+		// never paints. This wrapping must mirror Renderer::enumerate(),
+		// otherwise the counted height diverges from the painted one.
+		if (newWidthLeft >= 0
+			|| (w->position() == lineStart && !lineElided)) {
 			last_rBearing = w__f_rbearing;
 			last_rPadding = w->f_rpadding();
 			widthLeft = newWidthLeft;
@@ -1878,16 +1885,19 @@ void String::enumerateText(
 				const auto semantics = custom->semantics();
 				if (!semantics.exportEntity) {
 					const auto replacement = custom->replacementText();
-					const auto data = custom->entityData();
+					const auto empty = replacement.isEmpty();
 					appendPartCallback(
-						replacement.isEmpty()
+						empty
 							? base::StringViewMid(
 								_text,
 								rangeFrom,
 								rangeTo - rangeFrom)
 							: QStringView(replacement),
-						data,
-						false);
+						custom->entityData(),
+						false,
+						empty
+							? EntitiesInText()
+							: custom->replacementEntities());
 					continue;
 				}
 			}
@@ -1897,7 +1907,8 @@ void String::enumerateText(
 			appendPartCallback(
 				base::StringViewMid(_text, rangeFrom, rangeTo - rangeFrom),
 				customEmojiData,
-				true);
+				true,
+				EntitiesInText());
 		}
 	}
 }
@@ -2114,7 +2125,8 @@ TextForMimeData String::toText(
 	const auto appendPartCallback = [&](
 			QStringView part,
 			const QString &customEmojiData,
-			bool exportCustomEmojiEntity) {
+			bool exportCustomEmojiEntity,
+			const EntitiesInText &replacementEntities) {
 		const auto offset = int(result.rich.text.size());
 		result.rich.text += part;
 		if (composeExpanded) {
@@ -2137,6 +2149,16 @@ TextForMimeData String::toText(
 				int(part.size()),
 				customEmojiData,
 			});
+		}
+		if (composeEntities) {
+			for (const auto &entity : replacementEntities) {
+				insertEntity({
+					entity.type(),
+					offset + entity.offset(),
+					entity.length(),
+					entity.data(),
+				});
+			}
 		}
 	};
 
