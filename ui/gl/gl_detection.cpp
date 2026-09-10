@@ -9,6 +9,7 @@
 #include "ui/gl/gl_shader.h"
 #include "ui/integration.h"
 #include "base/debug_log.h"
+#include "base/event_filter.h"
 #include "base/options.h"
 #include "base/platform/base_platform_info.h"
 
@@ -18,11 +19,13 @@
 
 #include <QtCore/QSet>
 #include <QtCore/QFile>
+#include <QtCore/QPointer>
 #include <QtCore/QLibraryInfo>
 #include <QtGui/QWindow>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLFunctions>
 #include <QOpenGLWidget>
+#include <crl/crl_on_main.h>
 
 #ifdef DESKTOP_APP_USE_ANGLE
 #include <QtGui/QGuiApplication>
@@ -56,6 +59,11 @@ namespace {
 
 bool ForceDisabled/* = false*/;
 bool LastCheckCrashed/* = false*/;
+
+enum class CrashCheckStage {
+	OpenGL,
+	Vulkan,
+};
 
 base::options::toggle OptionUseQtRhi({
 	.id = kOptionUseQtRhi,
@@ -106,10 +114,14 @@ QList<QByteArray> EGLExtensions(not_null<QOpenGLContext*> context) {
 }
 #endif // DESKTOP_APP_USE_ANGLE
 
-void CrashCheckStart() {
+[[nodiscard]] QByteArray CrashCheckMarker(CrashCheckStage stage) {
+	return (stage == CrashCheckStage::Vulkan) ? "vulkan" : "1";
+}
+
+void CrashCheckStart(CrashCheckStage stage) {
 	auto f = QFile(Integration::Instance().openglCheckFilePath());
 	if (f.open(QIODevice::WriteOnly)) {
-		f.write("1", 1);
+		f.write(CrashCheckMarker(stage));
 		f.close();
 	}
 }
@@ -139,8 +151,53 @@ void CrashCheckStart() {
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
 #if !defined(Q_OS_MAC) && !defined(Q_OS_WIN) && QT_CONFIG(vulkan)
+// Before 545 NVIDIA presents Vulkan via egl-wayland, crashing on first frame.
+constexpr auto kNvidiaNativeWaylandWsiSince = 545;
+
+[[nodiscard]] int NvidiaDriverMajor(
+		const VkPhysicalDeviceDriverProperties &driver,
+		uint32 packedVersion) {
+	auto major = 0;
+	for (const auto ch : driver.driverInfo) {
+		if (ch < '0' || ch > '9') {
+			break;
+		}
+		major = major * 10 + (ch - '0');
+	}
+	return major ? major : int(packedVersion >> 22);
+}
+
+[[nodiscard]] bool VulkanPresentsThroughEglWayland(
+		QVulkanInstance &instance,
+		VkPhysicalDevice device) {
+	const auto getProperties2 = reinterpret_cast<
+		PFN_vkGetPhysicalDeviceProperties2>(
+			instance.getInstanceProcAddr("vkGetPhysicalDeviceProperties2"));
+	if (!getProperties2) {
+		return false;
+	}
+	auto driver = VkPhysicalDeviceDriverProperties{
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+	};
+	auto properties = VkPhysicalDeviceProperties2{
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+		.pNext = &driver,
+	};
+	getProperties2(device, &properties);
+	LOG(("RHI: Vulkan driver %1 %2."
+		).arg(QString::fromUtf8(driver.driverName)
+		).arg(QString::fromUtf8(driver.driverInfo)));
+	return Platform::IsWayland()
+		&& (driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+		&& (NvidiaDriverMajor(driver, properties.properties.driverVersion)
+			< kNvidiaNativeWaylandWsiSince);
+}
+
 [[nodiscard]] std::optional<RhiCapabilities> ProbeVulkanCapabilities() {
 	auto instance = QVulkanInstance();
+	if (instance.supportedApiVersion() >= QVersionNumber(1, 1)) {
+		instance.setApiVersion(QVersionNumber(1, 1));
+	}
 	if (!instance.create()) {
 		LOG(("RHI: Vulkan instance not available."));
 		return std::nullopt;
@@ -162,6 +219,12 @@ void CrashCheckStart() {
 		).arg(compute ? "yes" : "no"));
 	if (software) {
 		LOG(("RHI: Vulkan not chosen, software device."));
+		return std::nullopt;
+	}
+	const auto native = static_cast<const QRhiVulkanNativeHandles*>(
+		rhi->nativeHandles());
+	if (native && VulkanPresentsThroughEglWayland(instance, native->physDev)) {
+		LOG(("RHI: Vulkan not chosen, driver presents through egl-wayland."));
 		return std::nullopt;
 	}
 	return RhiCapabilities{
@@ -188,10 +251,12 @@ void CrashCheckStart() {
 #else // Q_OS_MAC || Q_OS_WIN
 #if QT_CONFIG(vulkan)
 	if (OptionEnableVulkanRhi.value()) {
+		CrashCheckStart(CrashCheckStage::Vulkan);
 		if (const auto vulkan = ProbeVulkanCapabilities()) {
 			return *vulkan;
 		}
 		LOG(("RHI: Falling back to OpenGL."));
+		CrashCheckStart(CrashCheckStage::OpenGL);
 	}
 #endif // QT_CONFIG(vulkan)
 	if (!OpenGLLibraryAvailable()) {
@@ -274,7 +339,7 @@ Capabilities CheckCapabilities(QWidget *widget) {
 		return *CachedTopLevel;
 	}
 
-	CrashCheckStart();
+	CrashCheckStart(CrashCheckStage::OpenGL);
 	const auto guard = gsl::finally([=] {
 		CrashCheckFinish();
 	});
@@ -456,7 +521,7 @@ RhiCapabilities CheckRhiCapabilities() {
 			if (ForceDisabled || LastCrashCheckFailed()) {
 				return RhiCapabilities();
 			}
-			CrashCheckStart();
+			CrashCheckStart(CrashCheckStage::OpenGL);
 		}
 		const auto value = ProbeRhiCapabilities();
 		if (!Platform::IsMac()) {
@@ -472,8 +537,22 @@ RhiCapabilities CheckRhiCapabilities() {
 
 void DetectLastCheckCrash() {
 	[[maybe_unused]] static const auto Once = [] {
-		LastCheckCrashed = !Platform::IsMac()
-			&& QFile::exists(Integration::Instance().openglCheckFilePath());
+		const auto path = Integration::Instance().openglCheckFilePath();
+		if (Platform::IsMac() || !QFile::exists(path)) {
+			return false;
+		}
+		auto f = QFile(path);
+		const auto marker = f.open(QIODevice::ReadOnly)
+			? f.readAll()
+			: QByteArray();
+		f.close();
+		if (marker != CrashCheckMarker(CrashCheckStage::Vulkan)) {
+			LastCheckCrashed = true;
+			return false;
+		}
+		LOG(("RHI: Last check crashed with Vulkan, disabling it."));
+		OptionEnableVulkanRhi.set(false);
+		CrashCheckFinish();
 		return false;
 	}();
 }
@@ -485,6 +564,48 @@ bool LastCrashCheckFailed() {
 
 void CrashCheckFinish() {
 	QFile::remove(Integration::Instance().openglCheckFilePath());
+}
+
+void CrashCheckFirstFrame(not_null<QWidget*> window) {
+	if (Platform::IsMac()) {
+		return;
+	}
+	struct State {
+		QPointer<QWindow> handle;
+		bool armed = false;
+	};
+	const auto state = std::make_shared<State>();
+	const auto guard = [=](not_null<QEvent*> e) {
+		if (e->type() == QEvent::Expose
+			&& state->armed
+			&& state->handle
+			&& state->handle->isExposed()) {
+			state->armed = false;
+			CrashCheckStart(WidgetsRhiVulkan()
+				? CrashCheckStage::Vulkan
+				: CrashCheckStage::OpenGL);
+			crl::on_main([] { CrashCheckFinish(); });
+		}
+		return base::EventFilterResult::Continue;
+	};
+	const auto attach = [=] {
+		const auto handle = window->windowHandle();
+		if (!handle) {
+			return;
+		}
+		state->armed = true;
+		if (state->handle.data() != handle) {
+			state->handle = handle;
+			base::install_event_filter(handle, guard);
+		}
+	};
+	base::install_event_filter(window, [=](not_null<QEvent*> e) {
+		if (e->type() == QEvent::WinIdChange) {
+			attach();
+		}
+		return base::EventFilterResult::Continue;
+	});
+	attach();
 }
 
 void ForceDisable(bool disable) {
