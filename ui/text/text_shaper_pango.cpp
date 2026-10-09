@@ -787,21 +787,92 @@ void Shape(
 	}
 }
 
-// The glyphs of a shaped item, drawn the way the font itself was loaded where
-// that is what this drawing needs, and through a font asked for again where it
-// is not - under a turn of the caller, or where subpixel antialiasing has to
-// go. Pango is left to do it in the first case: it draws the same glyphs the
-// same way, and it is the one that knows how to put a box with a code in it
-// where a glyph is missing.
-//
-// The face comes from the font itself and is never asked for by name: a name
-// goes through fontconfig again and can lead to another file - a family the
-// configuration substitutes, a metric-compatible clone of it - and the glyphs
-// of a shaped item are numbers that mean something else in another face.
+[[nodiscard]] std::optional<unsigned long> EmptyGlyphOf(
+		cairo_scaled_font_t *font) {
+	using Found = std::optional<unsigned long>;
+	static const auto key = cairo_user_data_key_t();
+	static auto mutex = std::mutex();
+	auto lock = std::unique_lock(mutex);
+	if (const auto already = cairo_scaled_font_get_user_data(font, &key)) {
+		return *static_cast<Found*>(already);
+	}
+	auto result = Found();
+	auto glyphs = (cairo_glyph_t*)nullptr;
+	auto count = 0;
+	const auto status = cairo_scaled_font_text_to_glyphs(
+		font,
+		0.,
+		0.,
+		" ",
+		1,
+		&glyphs,
+		&count,
+		nullptr,
+		nullptr,
+		nullptr);
+	if (status == CAIRO_STATUS_SUCCESS && count == 1) {
+		auto extents = cairo_text_extents_t();
+		cairo_scaled_font_glyph_extents(font, glyphs, 1, &extents);
+		if (!extents.width && !extents.height) {
+			result = glyphs[0].index;
+		}
+	}
+	cairo_glyph_free(glyphs);
+	const auto stored = new Found(result);
+	const auto destroy = [](void *data) {
+		delete static_cast<Found*>(data);
+	};
+	if (cairo_scaled_font_set_user_data(font, &key, stored, destroy)
+		!= CAIRO_STATUS_SUCCESS) {
+		destroy(stored);
+	}
+	return result;
+}
+
+// WHY: cairo cuts a run to the box of its glyphs placed at whole pixels, while it
+// draws them at quarter pixels with the fringe of the LCD filter, so the ends lose
+// ink (cairo#390, cairo!235); empty glyphs 2px outside the ink widen that box.
+void PadRun(
+		cairo_t *context,
+		unsigned long empty,
+		QRectF ink,
+		QVarLengthArray<cairo_glyph_t, 64> &list) {
+	if (ink.isEmpty()) {
+		return;
+	}
+	auto left = std::numeric_limits<double>::max();
+	auto top = left;
+	auto right = std::numeric_limits<double>::lowest();
+	auto bottom = right;
+	for (auto [cornerX, cornerY] : {
+			std::pair(ink.left(), ink.top()),
+			std::pair(ink.right(), ink.top()),
+			std::pair(ink.left(), ink.bottom()),
+			std::pair(ink.right(), ink.bottom()),
+		}) {
+		cairo_user_to_device(context, &cornerX, &cornerY);
+		left = std::min(left, cornerX);
+		top = std::min(top, cornerY);
+		right = std::max(right, cornerX);
+		bottom = std::max(bottom, cornerY);
+	}
+	constexpr auto kOutside = 2.;
+	for (auto [cornerX, cornerY] : {
+			std::pair(left - kOutside, top - kOutside),
+			std::pair(right + kOutside, top - kOutside),
+			std::pair(left - kOutside, bottom + kOutside),
+			std::pair(right + kOutside, bottom + kOutside),
+		}) {
+		cairo_device_to_user(context, &cornerX, &cornerY);
+		list.push_back({ .index = empty, .x = cornerX, .y = cornerY });
+	}
+}
+
 void ShowGlyphs(
 		cairo_t *context,
 		PangoFont *font,
 		PangoGlyphString *glyphs,
+		const PangoRectangle &ink,
 		bool subpixelAllowed) {
 	// What the caller turns or scales the text by, which the glyphs have to be
 	// rasterized through - the way the raster engine of Qt fills its cache of
@@ -813,8 +884,7 @@ void ShowGlyphs(
 		|| (turn.yy != 1.)
 		|| (turn.xy != 0.)
 		|| (turn.yx != 0.);
-	const auto scaled = ((!subpixelAllowed || turned)
-		&& PANGO_IS_CAIRO_FONT(font))
+	const auto scaled = PANGO_IS_CAIRO_FONT(font)
 		? pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font))
 		: nullptr;
 	if (!scaled) {
@@ -848,11 +918,14 @@ void ShowGlyphs(
 			options,
 			CAIRO_SUBPIXEL_ORDER_DEFAULT);
 	}
-	const auto with = cairo_scaled_font_create(
-		cairo_scaled_font_get_font_face(scaled),
-		&matrix,
-		&ctm,
-		options);
+	// By the face and not by name: fontconfig may give another file for a name.
+	const auto with = (subpixelAllowed && !turned)
+		? cairo_scaled_font_reference(scaled)
+		: cairo_scaled_font_create(
+			cairo_scaled_font_get_font_face(scaled),
+			&matrix,
+			&ctm,
+			options);
 	const auto guard = gsl::finally([&] {
 		cairo_scaled_font_destroy(with);
 	});
@@ -872,6 +945,11 @@ void ShowGlyphs(
 	auto x = 0.;
 	auto y = 0.;
 	cairo_get_current_point(context, &x, &y);
+	auto inked = QRectF(
+		x + ink.x / double(PANGO_SCALE),
+		y + ink.y / double(PANGO_SCALE),
+		ink.width / double(PANGO_SCALE),
+		ink.height / double(PANGO_SCALE));
 	auto list = QVarLengthArray<cairo_glyph_t, 64>();
 	auto missing = QVarLengthArray<Missing, 4>();
 	for (auto i = 0; i != glyphs->num_glyphs; ++i) {
@@ -891,6 +969,23 @@ void ShowGlyphs(
 			});
 		}
 		x += glyph.geometry.width / double(PANGO_SCALE);
+	}
+	if (const auto empty = EmptyGlyphOf(scaled)) {
+		if (turned && !list.isEmpty()) {
+			// Turned, the glyphs are hinted at another size than Pango measured.
+			auto extents = cairo_text_extents_t();
+			cairo_scaled_font_glyph_extents(
+				with,
+				list.data(),
+				list.size(),
+				&extents);
+			inked = QRectF(
+				list.front().x + extents.x_bearing,
+				list.front().y + extents.y_bearing,
+				extents.width,
+				extents.height);
+		}
+		PadRun(context, *empty, inked, list);
 	}
 	cairo_set_scaled_font(context, with);
 	cairo_show_glyphs(context, list.data(), list.size());
@@ -936,6 +1031,7 @@ void FillLines(cairo_t *context, QPointF from, const Lines &lines) {
 		QPointF at,
 		PangoFont *font,
 		PangoGlyphString *glyphs,
+		const PangoRectangle &ink,
 		const Lines &lines) {
 	// Painting a widget, the device of the painter is the widget itself and
 	// the pixels live in the buffer of the window behind it - which the engine
@@ -1062,7 +1158,7 @@ void FillLines(cairo_t *context, QPointF from, const Lines &lines) {
 		color.alphaF() * p.opacity());
 
 	cairo_move_to(context, position.x(), position.y());
-	ShowGlyphs(context, font, glyphs, onScreen);
+	ShowGlyphs(context, font, glyphs, ink, onScreen);
 	FillLines(context, position, lines);
 
 	return true;
@@ -2267,7 +2363,7 @@ void ShapedItem::draw(
 		}
 	}
 
-	if (!drawInPlace(p, at, item->analysis.font, part, lines)) {
+	if (!drawInPlace(p, at, item->analysis.font, part, ink, lines)) {
 		// What the painter turns the text by, without the scale by the ratio
 		// of the device that the glyphs were shaped in - the glyphs go through
 		// it here as well, because an image given to the painter would be
@@ -2278,23 +2374,68 @@ void ShapedItem::draw(
 		const auto turn = (full.type() < QTransform::TxProject)
 			? QTransform(rest.m11(), rest.m12(), rest.m21(), rest.m22(), 0, 0)
 			: QTransform();
-
-		// A glyph may reach outside its advance in every direction, so the
-		// ink is what the image has to hold, and where it sits places it.
-		for (const auto &line : lines) {
-			const auto united = QRect(ink.x, ink.y, ink.width, ink.height)
-				.united(line);
-			ink = { united.x(), united.y(), united.width(), united.height() };
+		auto origin = full.map(at);
+		if (rest.type() <= QTransform::TxTranslate) {
+			// The grid of drawInPlace().
+			origin.setY(std::round(origin.y()));
+			if (!SupportsSubpixelPositions(item->analysis.font)) {
+				origin.setX(std::round(origin.x()));
+			}
 		}
-		const auto inked = turn.mapRect(QRectF(
-			PANGO_PIXELS_FLOOR(ink.x),
-			PANGO_PIXELS_FLOOR(ink.y),
-			PANGO_PIXELS_CEIL(ink.x + ink.width) - PANGO_PIXELS_FLOOR(ink.x),
-			PANGO_PIXELS_CEIL(ink.y + ink.height) - PANGO_PIXELS_FLOOR(ink.y)));
-		const auto left = int(std::floor(inked.x()));
-		const auto top = int(std::floor(inked.y()));
-		const auto width = int(std::ceil(inked.x() + inked.width())) - left;
-		const auto height = int(std::ceil(inked.y() + inked.height())) - top;
+		const auto whole = QPointF(std::floor(origin.x()), std::floor(origin.y()));
+
+		// WHY: a font asked for again under a scale is hinted at that size, so the
+		// ink of Pango does not hold its glyphs - they are recorded first, and the
+		// ink of what was drawn is what the image has to hold.
+		const auto recording = cairo_recording_surface_create(
+			CAIRO_CONTENT_COLOR_ALPHA,
+			nullptr);
+		const auto record = cairo_create(recording);
+
+		// Subpixel antialiasing measures coverage per colour channel, and an image
+		// keeping one alpha per pixel has nowhere to hold that: put somewhere else
+		// afterwards, what was measured per channel turns into a tint. Drawing
+		// straight into the buffer of the painter is what it takes to keep it, so
+		// here the glyphs are asked for grey - of the font, because that is where
+		// the answer is kept.
+		const auto color = p.pen().color();
+		cairo_set_source_rgba(
+			record,
+			color.redF(),
+			color.greenF(),
+			color.blueF(),
+			color.alphaF());
+		const auto turning = cairo_matrix_t{
+			.xx = turn.m11(),
+			.yx = turn.m12(),
+			.xy = turn.m21(),
+			.yy = turn.m22(),
+		};
+		// Qt may antialias the edges of an image off whole pixels.
+		cairo_translate(record, origin.x() - whole.x(), origin.y() - whole.y());
+		cairo_transform(record, &turning);
+		cairo_move_to(record, 0, 0);
+		ShowGlyphs(record, item->analysis.font, part, ink, false);
+		FillLines(record, QPointF(), lines);
+		cairo_destroy(record);
+		auto inkX = 0.;
+		auto inkY = 0.;
+		auto inkWidth = 0.;
+		auto inkHeight = 0.;
+		cairo_recording_surface_ink_extents(
+			recording,
+			&inkX,
+			&inkY,
+			&inkWidth,
+			&inkHeight);
+		const auto left = int(std::floor(inkX));
+		const auto top = int(std::floor(inkY));
+		const auto width = int(std::ceil(inkX + inkWidth)) - left;
+		const auto height = int(std::ceil(inkY + inkHeight)) - top;
+		if (width <= 0 || height <= 0) {
+			cairo_surface_destroy(recording);
+			return;
+		}
 
 		// In pixels of the device, which is what Pango was asked in.
 		auto image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
@@ -2307,39 +2448,18 @@ void ShapedItem::draw(
 			height,
 			int(image.bytesPerLine()));
 		const auto context = cairo_create(surface);
-
-		// Subpixel antialiasing measures coverage per colour channel, and an image
-		// keeping one alpha per pixel has nowhere to hold that: put somewhere else
-		// afterwards, what was measured per channel turns into a tint. Drawing
-		// straight into the buffer of the painter is what it takes to keep it, so
-		// here the glyphs are asked for grey - of the font, because that is where
-		// the answer is kept.
-		const auto color = p.pen().color();
-		cairo_set_source_rgba(
-			context,
-			color.redF(),
-			color.greenF(),
-			color.blueF(),
-			color.alphaF());
-		cairo_translate(context, -left, -top);
-		const auto turning = cairo_matrix_t{
-			.xx = turn.m11(),
-			.yx = turn.m12(),
-			.xy = turn.m21(),
-			.yy = turn.m22(),
-		};
-		cairo_transform(context, &turning);
-		cairo_move_to(context, 0, 0);
-		ShowGlyphs(context, item->analysis.font, part, false);
-		FillLines(context, QPointF(), lines);
+		cairo_set_operator(context, CAIRO_OPERATOR_SOURCE);
+		cairo_set_source_surface(context, recording, -left, -top);
+		cairo_paint(context);
 		cairo_destroy(context);
 		cairo_surface_destroy(surface);
+		cairo_surface_destroy(recording);
 		image.setDevicePixelRatio(ratio);
 
 		// Where the image goes is counted in the pixels of the device, because
 		// the turn of the painter is in the glyphs already - so it is put there
 		// with only what places the painter itself left in the way.
-		const auto place = QPointF(full.map(at)) + QPointF(left, top);
+		const auto place = whole + QPointF(left, top);
 		auto invertible = false;
 		p.save();
 		p.setWorldTransform(QTransform());

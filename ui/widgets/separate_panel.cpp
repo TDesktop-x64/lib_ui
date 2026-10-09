@@ -450,13 +450,18 @@ SeparatePanel::SeparatePanel(SeparatePanelArgs &&args)
 		Platform::SetForeignTransientParent(this, _transientParent);
 	}, lifetime());
 
+	events(
+	) | rpl::filter([=](not_null<QEvent*> e) {
+		return (e->type() == QEvent::WindowStateChange);
+	}) | rpl::on_next([=] {
+		_fullscreen = isFullScreen();
+	}, lifetime());
+
 	Platform::FullScreenEvents(
 		this
 	) | rpl::on_next([=](Platform::FullScreenEvent event) {
 		if (event == Platform::FullScreenEvent::DidEnter) {
 			createFullScreenButtons();
-		} else if (event == Platform::FullScreenEvent::WillExit) {
-			_fullscreen = false;
 		}
 	}, lifetime());
 }
@@ -519,6 +524,7 @@ void SeparatePanel::initControls() {
 		} else if (!_fsClose) {
 			createFullScreenButtons();
 		}
+		updateControlsGeometry();
 	}, lifetime());
 
 	rpl::combine(
@@ -958,7 +964,9 @@ void SeparatePanel::toggleSearch(bool shown) {
 }
 
 void SeparatePanel::showMenu(Fn<void(const Menu::MenuCallback&)> fill) {
-	const auto created = createMenu(_menuToggle);
+	const auto created = createMenu(_fsMenuToggle
+		? not_null<RippleButton*>(_fsMenuToggle.get())
+		: not_null<RippleButton*>(_menuToggle.data()));
 	if (!created) {
 		return;
 	}
@@ -976,7 +984,7 @@ void SeparatePanel::showMenu(Fn<void(const Menu::MenuCallback&)> fill) {
 	}
 }
 
-bool SeparatePanel::createMenu(not_null<IconButton*> button) {
+bool SeparatePanel::createMenu(not_null<RippleButton*> button) {
 	if (_menu) {
 		return false;
 	}
@@ -1362,7 +1370,6 @@ QRect SeparatePanel::innerGeometry() const {
 }
 
 void SeparatePanel::toggleFullScreen(bool fullscreen) {
-	_fullscreen = fullscreen;
 	if (fullscreen) {
 		showFullScreen();
 	} else {
@@ -1390,14 +1397,14 @@ QMargins SeparatePanel::computePadding() const {
 
 void SeparatePanel::initGeometry(QSize size) {
 	const auto active = QApplication::activeWindow();
-	const auto screen = active
-		? active->screen()
+	const auto window = parentWidget() ? parentWidget()->window() : nullptr;
+	const auto parent = (window && window->isVisible()) ? window : active;
+	const auto screen = parent
+		? parent->screen()
 		: QGuiApplication::primaryScreen();
 	const auto available = screen ? screen->availableGeometry() : QRect();
-	const auto parentGeometry = (active
-			&& active->isVisible()
-			&& active->isActiveWindow())
-		? active->geometry()
+	const auto parentGeometry = (parent && parent->isVisible())
+		? parent->geometry()
 		: available;
 	_useTransparency = Platform::TranslucentWindowsSupported();
 	_padding = _useTransparency
