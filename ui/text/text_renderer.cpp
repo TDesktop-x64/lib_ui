@@ -656,6 +656,8 @@ void Renderer::initNextLine() {
 }
 
 void Renderer::initParagraphBidi() {
+	// A painter that failed to begin has no paint engine.
+	const auto engine = _p ? _p->paintEngine() : nullptr;
 	_paragraph.resolve(
 		_t,
 		_paragraphStart,
@@ -663,8 +665,8 @@ void Renderer::initParagraphBidi() {
 		(_paragraphDirection == Qt::RightToLeft),
 		int(_paragraphStartBlock - begin(_t->_blocks)),
 		-1,
-		(_p
-			? _p->paintEngine()->paintDevice()->devicePixelRatioF()
+		(engine
+			? engine->paintDevice()->devicePixelRatioF()
 			: _batch
 			? _batch->ratio
 			: 1.));
@@ -2070,6 +2072,10 @@ void Renderer::prepareElisionAt(
 		QString &lineText,
 		int &lineLength,
 		uint16 position) {
+	position = uint16(std::clamp(
+		int(position),
+		_lineStart,
+		_localFrom + int(lineText.size())));
 	lineText = lineText.mid(0, position - _localFrom) + kQEllipsis;
 	lineLength = position + kQEllipsis.size() - _lineStart;
 	_selection.to = std::min(_selection.to, position);
